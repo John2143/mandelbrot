@@ -1,6 +1,7 @@
 #include <cstdio>
 #include <cmath>
 #include <SDL2/SDL.h>
+#include <cstring>
 
 typedef double floating;
 
@@ -24,54 +25,87 @@ struct complex{
         floating curi = 0;
         floating r2 = 0;
         floating i2 = 0;
+
+        floating lastr = 0;
+        floating lasti = 0;
         for(int iter = 0; iter < MAX_ITER(preciseMode); iter++){
             curi = 2 * curi * curr + imag;
             curr = r2 - i2 + real;
             r2 = curr * curr;
             i2 = curi * curi;
+            if(r2 == lastr && i2 == lasti) break;
+
+            lastr = r2;
+            lasti = i2;
 
             if(r2 + i2 > DIVERGENCE_BOUNDARY * DIVERGENCE_BOUNDARY){
-                return 1 + iter - log(log(sqrt(r2 + i2)) / 2);
+                return 1 + iter - log(log(r2 + i2)) - log(4);
             }
         }
         return MAX_ITER(preciseMode);
     }
 };
 
-uint32_t hsvToRGB(floating h, floating s, floating v){
-    if(h >= 360.) h = 0;
-    floating hh = h / 60.;
-    long i = hh;
-    floating ff = hh - i;
-    floating p = v * (1. - s);
-    floating q = v * (1. - (s * ff));
-    floating t = v * (1. - (s * (1 - ff)));
-
-    #define intify(x) uint8_t x##_ = x * 0xff;
-    intify(v);
-    intify(p);
-    intify(q);
-    intify(t);
-    #undef intify
-
-    switch(i){
-    case 0: return v_ << 16 | t_ << 8 | p_;
-    case 1: return q_ << 16 | v_ << 8 | p_;
-    case 2: return p_ << 16 | v_ << 8 | t_;
-    case 3: return p_ << 16 | q_ << 8 | v_;
-    case 4: return t_ << 16 | p_ << 8 | v_;
-    case 5: return v_ << 16 | p_ << 8 | q_;
-    default: return 0;
-    }
-}
-
-static struct graphics{
+struct graphics{
     SDL_Window *window;
     int realw, realh;
     int scaleFactor;
     int width, height;
-    int aspectRatio;
-} G;
+    floating aspectRatio;
+
+    bool initialized;
+
+    SDL_Texture *texture, *texturePrecise;
+    SDL_Renderer *renderer;
+
+    graphics(){
+        initialized = false;
+        SDL_Init(SDL_INIT_VIDEO);
+
+        scaleFactor = 4;
+        realw = 1200;
+        realh = 800;
+
+        window = SDL_CreateWindow(
+            "mandelbrot", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
+            realw, realh, 0
+        );
+
+        renderer = SDL_CreateRenderer(window, -1, 0);
+
+        resize(realw, realh);
+
+        initialized = true;
+    }
+
+    ~graphics(){
+        SDL_DestroyTexture(texture);
+        SDL_DestroyTexture(texturePrecise);
+        SDL_DestroyRenderer(renderer);
+        SDL_DestroyWindow(window);
+        SDL_Quit();
+    }
+
+    void resize(int w, int h){
+        realw = w; realh = h;
+        width = realw / scaleFactor;
+        height = realh / scaleFactor;
+
+        if(initialized){
+            printf("remade\n");
+            SDL_DestroyTexture(texture);
+            SDL_DestroyTexture(texturePrecise);
+        }
+
+        texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STATIC, width, height);
+        texturePrecise = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STATIC, realw, realh);
+
+        aspectRatio = realh/(double) realw;
+        printf("Resized to %i %i, aspect %f\n", w, h, aspectRatio);
+
+    }
+
+};
 
 floating lerp(floating num, int max, floating start, floating end){
     return (num / (floating) max) * (end - start) + start;
@@ -87,17 +121,45 @@ static floating supersampleMapY[MAX_SUPERSAMPLES] = {.17, .84, .84, .17, .50, .1
 
 static int supersamples = 1;
 
-void draw(bool preciseMode, uint32_t *pixels, floating xpos, floating ypos, floating xsize){
-    bool has = false;
-    xsize /= 2;
-    floating endx = xpos + xsize;
-    floating endy = ypos + xsize * G.aspectRatio;
-    floating startx = xpos - xsize;
-    floating starty = ypos - xsize * G.aspectRatio;
-    int width  = preciseMode ? G.realw : G.width;
-    int height = preciseMode ? G.realh : G.height;
+struct renderScene{
+    const graphics &G;
+    bool preciseMode;
+    uint32_t *pixels;
+    floating xpos, ypos, xsize;
 
-    for(int y = 0; y < height; y++){
+    floating endx, endy, startx, starty;
+    int width, height;
+
+    renderScene(const graphics &G, floating x, floating y, floating size):
+        G(G), xpos(x), ypos(y), xsize(size){}
+
+    ~renderScene(){
+        delete []pixels;
+    }
+
+    void draw(bool precise){
+        printf("We are at (%f + %fi) with size %f (zooms %i)\n", (float) xpos, (float) ypos, (float) xsize, zooms);
+
+        preciseMode = precise;
+
+        xsize /= 2;
+        endx = xpos + xsize;
+        endy = ypos + xsize * G.aspectRatio;
+        startx = xpos - xsize;
+        starty = ypos - xsize * G.aspectRatio;
+        xsize *= 2;
+
+        width  = preciseMode ? G.realw : G.width;
+        height = preciseMode ? G.realh : G.height;
+
+        pixels = new uint32_t[width * height];
+
+        for(int y = 0; y < height; y++){
+            drawline(y, pixels + width * y);
+        }
+    }
+
+    void drawline(int y, uint32_t *memory){
         for(int x = 0; x < width; x++){
             double brightnessTotal = 0;
             for(int sam = 0; sam < supersamples; sam++){
@@ -106,57 +168,35 @@ void draw(bool preciseMode, uint32_t *pixels, floating xpos, floating ypos, floa
                     lerp(y + supersampleMapY[sam], height, starty, endy)
                 );
                 brightnessTotal += num.mandelbrotDiverge(preciseMode) / (MAX_ITER(preciseMode) + 1);
-                if(!has) printf("brightness %f\n", brightnessTotal);
             }
             brightnessTotal /= supersamples;
             brightnessTotal *= brightnessTotal;
             uint32_t value = brightnessTotal * 0xff;
-            if(!has) printf("vaoue %i\n", value);
-            has = true;
             value = 0xFF000000 + value + (value << 8) + (value << 16);
-            //uint32_t value = hsvToRGB(brightness * 360, 1, 1);
-            //value += 0xFF000000;
-            *pixels++ = value;
+            *memory++ = value;
         }
     }
-}
+};
 
-//.743421 + -.178880i is cool
 
 int main(int argc, char *argv[]){
     (void) argc; (void) argv;
-    SDL_Init(SDL_INIT_VIDEO);
 
     for(int i = 9; i < MAX_SUPERSAMPLES; i++){
         supersampleMapX[i] = rand() / (floating) RAND_MAX;
         supersampleMapY[i] = rand() / (floating) RAND_MAX;
     }
 
-    for(int i = 0; i < MAX_SUPERSAMPLES; i++){
-        printf("%f %f\n", supersampleMapX[i], supersampleMapY[i]);
-    }
+    graphics G;
 
-    G.realw = 1200; G.realh = 900;
-    G.scaleFactor = 4;
-    G.width = G.realw / G.scaleFactor;
-    G.height = G.realh / G.scaleFactor;
-    G.window = SDL_CreateWindow(
-        "mandelbrot", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
-        G.realw, G.realh, 0
-    );
-
-    SDL_Renderer *renderer = SDL_CreateRenderer(G.window, -1, 0);
-    SDL_Texture *texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STATIC, G.width, G.height);
-    SDL_Texture *texturePrecise = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STATIC, G.realw, G.realh);
-
-    G.aspectRatio = G.width/G.height;
-    uint32_t *pixels = new uint32_t[G.width * G.height];
-    uint32_t *pixelsPrecise = new uint32_t[G.realw * G.realh];
-
-    floating x = -.743421;
-    floating y = -.178880;
-    floating size = .00000001;
-    zooms = 29;
+    floating x = 0;
+    floating y = 0;
+    floating size = 3;
+    zooms = 0;
+    //floating x = -.743421;
+    //floating y = -.178880;
+    //floating size = .00000001;
+    //zooms = 29;
 
     bool preciseMode = false;
     bool singlePrecise = false;
@@ -168,8 +208,9 @@ int main(int argc, char *argv[]){
         switch(event.type){
         case SDL_MOUSEBUTTONDOWN:
             if(event.button.button == SDL_BUTTON_LEFT){
+                printf("clicked %i %i\n", event.button.x, event.button.y);
                 x = lerp(event.button.x, G.realw, x - size/2, x + size / 2);
-                y = lerp(event.button.y, G.realh, y - size/2, y + size * G.aspectRatio / 2);
+                y = lerp(event.button.y, G.realh, y - size * G.aspectRatio / 2, y + size * G.aspectRatio / 2);
                 size /= 2;
                 isRendered = false;
                 zooms++;
@@ -180,7 +221,6 @@ int main(int argc, char *argv[]){
                     zooms--;
                 }
             }
-            printf("We are at (%f + %fi) with size %f (zooms %i)\n", (float) x, (float) y, (float) size, zooms);
         break;
         case SDL_KEYDOWN:
             if(event.key.keysym.sym == SDLK_f){
@@ -200,24 +240,35 @@ int main(int argc, char *argv[]){
                 goto CLEANUP;
             }
         break;
+        case SDL_WINDOWEVENT:
+            switch(event.window.event){
+            case SDL_WINDOWEVENT_RESIZED:
+            case SDL_WINDOWEVENT_SIZE_CHANGED:
+                G.resize(event.window.data1, event.window.data2);
+                isRendered = false;
+            break;
+            }
+        break;
         case SDL_QUIT: goto CLEANUP; break;
         }
 
         if(!isRendered){
-            SDL_RenderClear(renderer);
-
+            renderScene s(G, x, y, size);
             if(preciseMode || singlePrecise){
-                draw(true, pixelsPrecise, x, y, size);
-                SDL_UpdateTexture(texturePrecise, NULL, pixelsPrecise, G.realw * sizeof(uint32_t));
-                SDL_RenderCopy(renderer, texturePrecise, NULL, NULL);
-                singlePrecise = false;
+                s.draw(true);
+                SDL_UpdateTexture(G.texturePrecise, NULL, s.pixels, G.realw * sizeof(uint32_t));
+                SDL_RenderClear(G.renderer);
+                SDL_RenderCopy(G.renderer, G.texturePrecise, NULL, NULL);
             }else{
-                draw(false, pixels, x, y, size);
-                SDL_UpdateTexture(texture, NULL, pixels, G.width * sizeof(uint32_t));
-                SDL_RenderCopy(renderer, texture, NULL, NULL);
+                s.draw(false);
+                SDL_UpdateTexture(G.texture, NULL, s.pixels, G.width * sizeof(uint32_t));
+                SDL_RenderClear(G.renderer);
+                SDL_RenderCopy(G.renderer, G.texture, NULL, NULL);
             }
 
-            SDL_RenderPresent(renderer);
+            SDL_RenderPresent(G.renderer);
+
+            singlePrecise = false;
             isRendered = true;
         }
         fflush(stdout);
@@ -227,11 +278,5 @@ int main(int argc, char *argv[]){
 
 CLEANUP:
 
-    delete[] pixelsPrecise;
-    delete[] pixels;
-    SDL_DestroyTexture(texture);
-    SDL_DestroyRenderer(renderer);
-    SDL_DestroyWindow(G.window);
-    SDL_Quit();
     return 0;
 }
