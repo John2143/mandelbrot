@@ -18,9 +18,22 @@ struct complex{
         printf("(%f + %fi)", (float) real, (float) imag);
     }
 
-    #define MAX_ITER(preciseMode) (preciseMode ? (100 + zooms * 100) : (50 + zooms * 60))
+    bool checkCardoid() const{
+        floating a1 = real - 1/4;
+        floating p = sqrt(a1 * a1 + imag * imag);
+        if(real < p - 2 * p * p + 1/4){
+            if((real + 1) * (real + 1) + imag * imag < 1/16){
+                return true;
+            }
+        }
+        return false;
+    }
+
+    #define MAX_ITERZ(preciseMode, zooms) (preciseMode ? (100 + zooms * 100) : (50 + zooms * 60))
+    #define MAX_ITER(preciseMode) MAX_ITERZ(preciseMode, zooms)
     const floating DIVERGENCE_BOUNDARY = 2;
     double mandelbrotDiverge(bool preciseMode) const{
+        if(checkCardoid()) return MAX_ITER(preciseMode);
         floating curr = 0;
         floating curi = 0;
         floating r2 = 0;
@@ -125,15 +138,21 @@ struct renderScene{
     const graphics &G;
     bool preciseMode;
     uint32_t *pixels;
+    floating *data;
     floating xpos, ypos, xsize;
 
     floating endx, endy, startx, starty;
     int width, height;
 
     renderScene(const graphics &G, floating x, floating y, floating size):
-        G(G), xpos(x), ypos(y), xsize(size){}
+        G(G), xpos(x), ypos(y), xsize(size){
+
+        pixels = nullptr;
+        data = nullptr;
+    }
 
     ~renderScene(){
+        delete []data;
         delete []pixels;
     }
 
@@ -152,28 +171,40 @@ struct renderScene{
         width  = preciseMode ? G.realw : G.width;
         height = preciseMode ? G.realh : G.height;
 
-        pixels = new uint32_t[width * height];
+        data = new floating[width * height];
 
         for(int y = 0; y < height; y++){
-            drawline(y, pixels + width * y);
+            drawline(y, data + width * y);
         }
+
+        render();
     }
 
-    void drawline(int y, uint32_t *memory){
+    void drawline(int y, floating *memory){
         for(int x = 0; x < width; x++){
-            double brightnessTotal = 0;
+            floating brightnessTotal = 0;
             for(int sam = 0; sam < supersamples; sam++){
                 complex num(
                     lerp(x + supersampleMapX[sam], width,  startx, endx),
                     lerp(y + supersampleMapY[sam], height, starty, endy)
                 );
-                brightnessTotal += num.mandelbrotDiverge(preciseMode) / (MAX_ITER(preciseMode) + 1);
+                brightnessTotal += num.mandelbrotDiverge(preciseMode);
             }
             brightnessTotal /= supersamples;
-            brightnessTotal *= brightnessTotal;
-            uint32_t value = brightnessTotal * 0xff;
+            *memory++ = brightnessTotal;
+        }
+    }
+
+    void render(){
+        delete []pixels;
+        pixels = new uint32_t[width * height];
+        for(int i = 0; i < width * height; i++){
+            data[i] = data[i] / (MAX_ITER(preciseMode) + 1);
+            data[i] *= data[i];
+            data[i] *= data[i];
+            uint32_t value = data[i] * 0xff;
             value = 0xFF000000 + value + (value << 8) + (value << 16);
-            *memory++ = value;
+            pixels[i] = value;
         }
     }
 };
@@ -189,10 +220,16 @@ int main(int argc, char *argv[]){
 
     graphics G;
 
-    floating x = 0;
-    floating y = 0;
-    floating size = 3;
-    zooms = 0;
+    //floating x = 0;
+    //floating y = 0;
+    //floating size = 3;
+    //zooms = 0;
+    //
+    floating x = -.748930;
+    floating y = -.056503;
+    floating size = .001465;
+    zooms = 13;
+    //
     //floating x = -.743421;
     //floating y = -.178880;
     //floating size = .00000001;
