@@ -1,6 +1,6 @@
 CC=g++ -std=c++11
 CFLAGS=-Wall -Wextra -Werror
-CFLAGS+=-g
+CFLAGS+=-pg
 COM=$(CC) $(CFLAGS)
 SOURCES := $(wildcard src/*.cpp)
 SOURCES := $(filter-out $(wildcard src/*_L.cpp), $(SOURCES))
@@ -11,7 +11,6 @@ ifeq ($(shell uname),Linux)
 LIBRARIES=-L. -lSDL2main -lSDL2 -lm
 else
 LIBRARIES=-L. -lSDL2main -lSDL2
-EXECUTABLE+=.exe
 endif
 
 .PHONY: clean all

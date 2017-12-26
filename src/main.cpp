@@ -2,6 +2,12 @@
 #include <cmath>
 #include <SDL2/SDL.h>
 #include <cstring>
+#include <thread>
+#include <mingw.thread.h>
+#include <mutex>
+#include <mingw.mutex.h>
+#include <condition_variable>
+#include <mingw.condition_variable.h>
 
 typedef double floating;
 
@@ -29,7 +35,7 @@ struct complex{
         return false;
     }
 
-    #define MAX_ITERZ(preciseMode, zooms) (preciseMode ? (100 + zooms * 100) : (50 + zooms * 60))
+    #define MAX_ITERZ(preciseMode, zooms) (preciseMode ? (100 + zooms * 100) : (1 + zooms * 10))
     #define MAX_ITER(preciseMode) MAX_ITERZ(preciseMode, zooms)
     const floating DIVERGENCE_BOUNDARY = 2;
     double mandelbrotDiverge(bool preciseMode) const{
@@ -41,7 +47,7 @@ struct complex{
 
         floating lastr = 0;
         floating lasti = 0;
-        for(int iter = 0; iter < MAX_ITER(preciseMode); iter++){
+        for(int iter = 0; iter < MAX_ITER(preciseMode) - 1; iter++){
             curi = 2 * curi * curr + imag;
             curr = r2 - i2 + real;
             r2 = curr * curr;
@@ -52,7 +58,7 @@ struct complex{
             lasti = i2;
 
             if(r2 + i2 > DIVERGENCE_BOUNDARY * DIVERGENCE_BOUNDARY){
-                return 1 + iter - log(log(r2 + i2)) - log(4);
+                return 1 + iter - log(log(r2 + i2)) / log(2);
             }
         }
         return MAX_ITER(preciseMode);
@@ -81,7 +87,7 @@ struct graphics{
 
         window = SDL_CreateWindow(
             "mandelbrot", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
-            realw, realh, 0
+            realw, realh, SDL_WINDOW_RESIZABLE
         );
 
         renderer = SDL_CreateRenderer(window, -1, 0);
@@ -120,13 +126,16 @@ struct graphics{
 
 };
 
+struct renderSettings{
+    floating pctscale;
+    bool square;
+};
+
+#define NUM_THREADS 8
+
 floating lerp(floating num, int max, floating start, floating end){
     return (num / (floating) max) * (end - start) + start;
 }
-
-// 183
-// 657
-// 492
 
 #define MAX_SUPERSAMPLES 100
 static floating supersampleMapX[MAX_SUPERSAMPLES] = {.17, .84, .17, .84, .50, .50, .50, .17, .84};
@@ -135,9 +144,9 @@ static floating supersampleMapY[MAX_SUPERSAMPLES] = {.17, .84, .84, .17, .50, .1
 static int supersamples = 1;
 
 struct renderScene{
+    renderSettings set;
     const graphics &G;
     bool preciseMode;
-    uint32_t *pixels;
     floating *data;
     floating xpos, ypos, xsize;
 
@@ -147,18 +156,30 @@ struct renderScene{
     renderScene(const graphics &G, floating x, floating y, floating size):
         G(G), xpos(x), ypos(y), xsize(size){
 
-        pixels = nullptr;
         data = nullptr;
     }
 
     ~renderScene(){
         delete []data;
-        delete []pixels;
     }
 
+    renderScene &operator=(const renderScene &rhs){
+        xpos = rhs.xpos;
+        ypos = rhs.ypos;
+        xsize = rhs.xsize;
+        return *this;
+    }
+
+#define MARK() printf("%i\n", __LINE__); fflush(stdout);
+#define BOOL(b) ((b) ? "true" : "false")
     void draw(bool precise){
         printf("We are at (%f + %fi) with size %f (zooms %i)\n", (float) xpos, (float) ypos, (float) xsize, zooms);
 
+        if(preciseMode != precise){
+            delete []data;
+            data = nullptr;
+        }
+        printf("preciseMode = %s, passed %s\n", BOOL(preciseMode), BOOL(precise));
         preciseMode = precise;
 
         xsize /= 2;
@@ -171,13 +192,43 @@ struct renderScene{
         width  = preciseMode ? G.realw : G.width;
         height = preciseMode ? G.realh : G.height;
 
-        data = new floating[width * height];
-
-        for(int y = 0; y < height; y++){
-            drawline(y, data + width * y);
+        if(data == nullptr){
+            data = new floating[width * height];
         }
 
-        render();
+        std::thread threads[NUM_THREADS];
+        int numlines = height/NUM_THREADS;
+        for(int i = 0; i < NUM_THREADS; i++){
+            //make the last thread handle the remaining lines
+            int linesLeft = i == NUM_THREADS - 1 ? numlines + (height % NUM_THREADS) : numlines;
+            threads[i] = std::thread([=](){
+                drawThread(i * numlines, linesLeft);
+            });
+        }
+
+        for(int i = 0; i < NUM_THREADS; i++){
+            threads[i].join();
+        }
+    }
+
+    std::mutex copyMutex;
+
+    void drawThread(int linesoffset, int numlines){
+        printf("Starting at y=%i, len=%i, width=%i\n", linesoffset, numlines, width);
+        const int bufferSize = numlines * width;
+        floating *mem = new floating[bufferSize];
+
+        for(int y = 0; y < numlines; y++){
+            drawline(y + linesoffset, &mem[y * width]);
+        }
+
+        copyMutex.lock();
+        for(int i = 0; i < numlines * width; i++){
+            data[linesoffset * width + i] = mem[i];
+        }
+        copyMutex.unlock();
+
+        delete []mem;
     }
 
     void drawline(int y, floating *memory){
@@ -195,20 +246,38 @@ struct renderScene{
         }
     }
 
-    void render(){
-        delete []pixels;
-        pixels = new uint32_t[width * height];
+#define max(a, b) ((a) > (b) ? (a) : (b))
+#define min(a, b) ((a) < (b) ? (a) : (b))
+#define clamp(n, a, b) min(max(n, a), b)
+
+    void shader(uint32_t *pixels){
         for(int i = 0; i < width * height; i++){
-            data[i] = data[i] / (MAX_ITER(preciseMode) + 1);
-            data[i] *= data[i];
-            data[i] *= data[i];
-            uint32_t value = data[i] * 0xff;
+            float f = data[i];
+            f /= ((MAX_ITER(preciseMode) + 1) * set.pctscale);
+            f = clamp(f, 0, 1);
+            if(set.square){
+                f *= f;
+            }
+            uint32_t value = f * 0xff;
             value = 0xFF000000 + value + (value << 8) + (value << 16);
             pixels[i] = value;
         }
     }
-};
 
+    void blit(){
+        uint32_t *pixels = new uint32_t[width * height];
+        shader(pixels);
+
+        SDL_Texture *tex = preciseMode ? G.texturePrecise : G.texture;
+        size_t lineLength = preciseMode ? G.realw : G.width;
+
+        SDL_UpdateTexture(tex, NULL, pixels, lineLength * sizeof(uint32_t));
+        SDL_RenderClear(G.renderer);
+        SDL_RenderCopy(G.renderer, tex, NULL, NULL);
+        SDL_RenderPresent(G.renderer);
+        delete []pixels;
+    }
+};
 
 int main(int argc, char *argv[]){
     (void) argc; (void) argv;
@@ -237,7 +306,13 @@ int main(int argc, char *argv[]){
 
     bool preciseMode = false;
     bool singlePrecise = false;
-    bool isRendered = false;
+
+    bool isCalculated = false;
+    bool isRendered = true;
+
+    renderScene s(G, x, y, size);
+    s.set.pctscale = 1;
+    s.set.square = true;
 
     SDL_Event event;
     event.type = -1;
@@ -249,14 +324,16 @@ int main(int argc, char *argv[]){
                 x = lerp(event.button.x, G.realw, x - size/2, x + size / 2);
                 y = lerp(event.button.y, G.realh, y - size * G.aspectRatio / 2, y + size * G.aspectRatio / 2);
                 size /= 2;
-                isRendered = false;
+                isCalculated = false;
                 zooms++;
+                s = renderScene(G, x, y, size);
             }else if(event.button.button == SDL_BUTTON_RIGHT){
                 if(zooms > 0){
                     size *= 2;
-                    isRendered = false;
+                    isCalculated = false;
                     zooms--;
                 }
+                s = renderScene(G, x, y, size);
             }
         break;
         case SDL_KEYDOWN:
@@ -265,6 +342,9 @@ int main(int argc, char *argv[]){
                 printf("Precise mode %s\n", preciseMode ? "yes" : "no");
             }else if(event.key.keysym.sym == SDLK_r){
                 singlePrecise = true;
+                isCalculated = false;
+                printf("Claculating a single frame\n");
+            }else if(event.key.keysym.sym == SDLK_e){
                 isRendered = false;
                 printf("Rendering a single frame\n");
             }else if(event.key.keysym.sym == SDLK_RIGHT){
@@ -273,39 +353,38 @@ int main(int argc, char *argv[]){
             }else if(event.key.keysym.sym == SDLK_LEFT){
                 if(supersamples > 1) supersamples--;
                 printf("Supersamples is %i\n", supersamples);
+            }else if(event.key.keysym.sym == SDLK_UP){
+                if(s.set.pctscale < 1) s.set.pctscale += .025;
+                isRendered = false;
+                printf("Gamma scaling is %f\n", s.set.pctscale);
+            }else if(event.key.keysym.sym == SDLK_DOWN){
+                if(s.set.pctscale > 0) s.set.pctscale -= .025;
+                isRendered = false;
+                printf("Gamma scaling is %f\n", s.set.pctscale);
             }else if(event.key.keysym.sym == SDLK_q){
                 goto CLEANUP;
             }
         break;
         case SDL_WINDOWEVENT:
             switch(event.window.event){
-            case SDL_WINDOWEVENT_RESIZED:
+            //case SDL_WINDOWEVENT_RESIZED:
             case SDL_WINDOWEVENT_SIZE_CHANGED:
                 G.resize(event.window.data1, event.window.data2);
-                isRendered = false;
+                isCalculated = false;
             break;
             }
         break;
         case SDL_QUIT: goto CLEANUP; break;
         }
 
-        if(!isRendered){
-            renderScene s(G, x, y, size);
-            if(preciseMode || singlePrecise){
-                s.draw(true);
-                SDL_UpdateTexture(G.texturePrecise, NULL, s.pixels, G.realw * sizeof(uint32_t));
-                SDL_RenderClear(G.renderer);
-                SDL_RenderCopy(G.renderer, G.texturePrecise, NULL, NULL);
-            }else{
-                s.draw(false);
-                SDL_UpdateTexture(G.texture, NULL, s.pixels, G.width * sizeof(uint32_t));
-                SDL_RenderClear(G.renderer);
-                SDL_RenderCopy(G.renderer, G.texture, NULL, NULL);
-            }
-
-            SDL_RenderPresent(G.renderer);
-
+        if(!isCalculated){
+            s.draw(preciseMode || singlePrecise);
+            s.blit();
             singlePrecise = false;
+            isCalculated = true;
+            isRendered = true;
+        }else if(!isRendered){
+            s.blit();
             isRendered = true;
         }
         fflush(stdout);
