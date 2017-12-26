@@ -1,6 +1,6 @@
 CC=g++ -std=c++11
 CFLAGS=-Wall -Wextra -Werror
-CFLAGS+=-g
+CFLAGS+=-g -pg -fopenmp
 COM=$(CC) $(CFLAGS)
 SOURCES := $(wildcard src/*.cpp)
 SOURCES := $(filter-out $(wildcard src/*_L.cpp), $(SOURCES))

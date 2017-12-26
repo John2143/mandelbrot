@@ -1,8 +1,0 @@
-Resized to 1200 800
-We are at (0.000000 + 0.000000i) with size 3.000000 (zooms 0)
-Resized to 640 1080
-remade
-We are at (0.000000 + 0.000000i) with size 3.000000 (zooms 0)
-Resized to 640 1080
-remade
-We are at (0.000000 + 0.000000i) with size 3.000000 (zooms 0)

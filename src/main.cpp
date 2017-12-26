@@ -15,17 +15,11 @@ typedef double floating;
 static int zooms = 0;
 
 struct complex{
-    floating real, imag;
-
-    complex() : real(0), imag(0){}
-    complex(floating re, floating im) : real(re), imag(im){}
-    ~complex(){}
-
-    void print() const{
+    static void print(floating real, floating imag){
         printf("(%f + %fi)", (float) real, (float) imag);
     }
 
-    bool checkCardoid() const{
+    static bool checkCardoid(floating real, floating imag){
         floating a1 = real - 1/4;
         floating p = sqrt(a1 * a1 + imag * imag);
         if(real < p - 2 * p * p + 1/4){
@@ -38,9 +32,8 @@ struct complex{
 
     #define MAX_ITERZ(preciseMode, zooms) (preciseMode ? (100 + zooms * 200) : (10 + zooms * 50))
     #define MAX_ITER(preciseMode) MAX_ITERZ(preciseMode, zooms)
-    const floating DIVERGENCE_BOUNDARY = 2;
-    double mandelbrotDiverge(bool preciseMode) const{
-        if(checkCardoid()) return MAX_ITER(preciseMode);
+    static constexpr floating DIVERGENCE_BOUNDARY = 2.;
+    static double mandelbrotDiverge(bool preciseMode, floating real, floating imag){
         floating curr = 0;
         floating curi = 0;
         floating r2 = 0;
@@ -104,8 +97,11 @@ struct graphics{
         SDL_Quit();
     }
 
-    void resize(int w, int h){
-        if(w == realw && h == realh) return;
+    bool resize(int w, int h){
+        if(w == realw && h == realh){
+            printf("tried resize %i %i\n", w, h);
+            return true;
+        }
 
         SDL_SetWindowSize(window, w, h);
         realw = w; realh = h;
@@ -123,7 +119,7 @@ struct graphics{
 
         aspectRatio = realh/(double) realw;
         printf("Resized to %i %i, aspect %f\n", w, h, aspectRatio);
-
+        return false;
     }
 
 };
@@ -131,23 +127,33 @@ struct graphics{
 struct renderSettings{
     floating pctscale;
     bool square;
+    int supersamples = 4;
+
+#define MAX_SUPERSAMPLES 100
+    floating supersampleMapX[MAX_SUPERSAMPLES];
+    floating supersampleMapY[MAX_SUPERSAMPLES];
+
+    renderSettings():
+        supersampleMapX{.17, .84, .17, .84, .50, .50, .50, .17, .84},
+        supersampleMapY{.17, .84, .84, .17, .50, .17, .84, .50, .50}
+    {
+        for(int i = 9; i < MAX_SUPERSAMPLES; i++){
+            supersampleMapX[i] = rand() / (floating) RAND_MAX;
+            supersampleMapY[i] = rand() / (floating) RAND_MAX;
+        }
+    }
+
 };
 
-#define NUM_THREADS 8
+static int NUM_THREADS = std::thread::hardware_concurrency();
 
-floating lerp(floating num, int max, floating start, floating end){
+inline floating lerp(floating num, int max, floating start, floating end){
     return (num / (floating) max) * (end - start) + start;
 }
 
-#define MAX_SUPERSAMPLES 100
-static floating supersampleMapX[MAX_SUPERSAMPLES] = {.17, .84, .17, .84, .50, .50, .50, .17, .84};
-static floating supersampleMapY[MAX_SUPERSAMPLES] = {.17, .84, .84, .17, .50, .17, .84, .50, .50};
-
-static int supersamples = 1;
-
 struct renderScene{
     renderSettings set;
-    const graphics &G;
+    graphics &G;
     bool preciseMode;
     floating *data;
     floating xpos, ypos, xsize;
@@ -155,7 +161,7 @@ struct renderScene{
     floating endx, endy, startx, starty;
     int width, height;
 
-    renderScene(const graphics &G, floating x, floating y, floating size):
+    renderScene(graphics &G, floating x, floating y, floating size):
         G(G), xpos(x), ypos(y), xsize(size){
 
         data = nullptr;
@@ -169,6 +175,8 @@ struct renderScene{
         xpos = rhs.xpos;
         ypos = rhs.ypos;
         xsize = rhs.xsize;
+        delete []data;
+        data = nullptr;
         return *this;
     }
 
@@ -197,7 +205,7 @@ struct renderScene{
         height = preciseMode ? G.realh : G.height;
 
         if(data == nullptr){
-            data = new floating[width * height * 3];
+            data = new floating[width * height];
         }
 
         threadsDone.store(0);
@@ -231,11 +239,15 @@ struct renderScene{
 
         for(int y = 0; y < numlines; y++){
             drawline(y + linesoffset, &mem[y * width]);
-            copyMutex.lock();
+            std::lock_guard<std::mutex> lock(copyMutex);
             for(int i = 0; i < width; i++){
                 data[(linesoffset + y) * width + i] = mem[i + y * width];
             }
-            copyMutex.unlock();
+            if(y != numlines - 1){
+                for(int i = 0; i < width; i++){
+                    data[(linesoffset + y + 1) * width + i] = 0xffff0ff0;
+                }
+            }
         }
 
         delete []mem;
@@ -244,14 +256,13 @@ struct renderScene{
     void drawline(int y, floating *memory){
         for(int x = 0; x < width; x++){
             floating brightnessTotal = 0;
-            for(int sam = 0; sam < supersamples; sam++){
-                complex num(
-                    lerp(x + supersampleMapX[sam], width,  startx, endx),
-                    lerp(y + supersampleMapY[sam], height, starty, endy)
+            for(int sam = 0; sam < set.supersamples; sam++){
+                brightnessTotal += complex::mandelbrotDiverge(preciseMode,
+                    lerp(x + set.supersampleMapX[sam], width,  startx, endx),
+                    lerp(y + set.supersampleMapY[sam], height, starty, endy)
                 );
-                brightnessTotal += num.mandelbrotDiverge(preciseMode);
             }
-            brightnessTotal /= supersamples;
+            brightnessTotal /= set.supersamples;
             *memory++ = brightnessTotal;
         }
     }
@@ -275,6 +286,7 @@ struct renderScene{
     }
 
     void blit(){
+        if(data == nullptr) return;
         uint32_t *pixels = new uint32_t[width * height];
         shader(pixels);
 
@@ -291,11 +303,6 @@ struct renderScene{
 
 int main(int argc, char *argv[]){
     (void) argc; (void) argv;
-
-    for(int i = 9; i < MAX_SUPERSAMPLES; i++){
-        supersampleMapX[i] = rand() / (floating) RAND_MAX;
-        supersampleMapY[i] = rand() / (floating) RAND_MAX;
-    }
 
     graphics G;
 
@@ -321,9 +328,9 @@ int main(int argc, char *argv[]){
     //zooms = 29;
 
     bool preciseMode = false;
-    bool singlePrecise = false;
+    bool singlePrecise = true;
 
-    bool isCalculated = false;
+    bool isCalculated = true;
     bool isRendered = true;
 
     renderScene s(G, x, y, size);
@@ -366,11 +373,11 @@ int main(int argc, char *argv[]){
                 isRendered = false;
                 printf("Rendering a single frame\n");
             }else if(event.key.keysym.sym == SDLK_RIGHT){
-                if((size_t) supersamples < sizeof(supersampleMapX) / sizeof(supersampleMapX[0])) supersamples++;
-                printf("Supersamples is %i\n", supersamples);
+                if((size_t) s.set.supersamples < sizeof(s.set.supersampleMapX) / sizeof(s.set.supersampleMapX[0])) s.set.supersamples++;
+                printf("Supersamples is %i\n", s.set.supersamples);
             }else if(event.key.keysym.sym == SDLK_LEFT){
-                if(supersamples > 1) supersamples--;
-                printf("Supersamples is %i\n", supersamples);
+                if(s.set.supersamples > 1) s.set.supersamples--;
+                printf("Supersamples is %i\n", s.set.supersamples);
             }else if(event.key.keysym.sym == SDLK_UP){
                 if(s.set.pctscale < 1) s.set.pctscale += .025;
                 isRendered = false;
@@ -386,7 +393,6 @@ int main(int argc, char *argv[]){
                 fullscreen = !fullscreen;
                 printf("fullscreen mode %s\n", BOOL(fullscreen));
                 SDL_SetWindowFullscreen(G.window, fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
-                isCalculated = false;
             }else if(event.key.keysym.sym == SDLK_q){
                 goto CLEANUP;
             }
@@ -395,8 +401,7 @@ int main(int argc, char *argv[]){
             switch(event.window.event){
             //case SDL_WINDOWEVENT_RESIZED:
             case SDL_WINDOWEVENT_SIZE_CHANGED:
-                G.resize(event.window.data1, event.window.data2);
-                isCalculated = false;
+                isCalculated = !G.resize(event.window.data1, event.window.data2);
             break;
             }
         break;
@@ -410,10 +415,12 @@ int main(int argc, char *argv[]){
                 singlePrecise = false;
                 isCalculated = true;
                 isRendered = true;
+                goto CLEANUP;
             }else if(!isRendered){
                 s.blit();
                 isRendered = true;
             }
+
         }catch(std::bad_alloc& exc){
             printf("OOM\n");
             fflush(stdout);
