@@ -8,6 +8,7 @@
 #include <mingw.mutex.h>
 #include <condition_variable>
 #include <mingw.condition_variable.h>
+#include <atomic>
 
 typedef double floating;
 
@@ -35,7 +36,7 @@ struct complex{
         return false;
     }
 
-    #define MAX_ITERZ(preciseMode, zooms) (preciseMode ? (100 + zooms * 100) : (1 + zooms * 10))
+    #define MAX_ITERZ(preciseMode, zooms) (preciseMode ? (100 + zooms * 200) : (10 + zooms * 50))
     #define MAX_ITER(preciseMode) MAX_ITERZ(preciseMode, zooms)
     const floating DIVERGENCE_BOUNDARY = 2;
     double mandelbrotDiverge(bool preciseMode) const{
@@ -82,17 +83,15 @@ struct graphics{
         SDL_Init(SDL_INIT_VIDEO);
 
         scaleFactor = 4;
-        realw = 1200;
-        realh = 800;
 
         window = SDL_CreateWindow(
             "mandelbrot", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
-            realw, realh, SDL_WINDOW_RESIZABLE
+            20, 20, SDL_WINDOW_RESIZABLE
         );
 
         renderer = SDL_CreateRenderer(window, -1, 0);
 
-        resize(realw, realh);
+        resize(1200, 800);
 
         initialized = true;
     }
@@ -106,6 +105,9 @@ struct graphics{
     }
 
     void resize(int w, int h){
+        if(w == realw && h == realh) return;
+
+        SDL_SetWindowSize(window, w, h);
         realw = w; realh = h;
         width = realw / scaleFactor;
         height = realh / scaleFactor;
@@ -172,6 +174,8 @@ struct renderScene{
 
 #define MARK() printf("%i\n", __LINE__); fflush(stdout);
 #define BOOL(b) ((b) ? "true" : "false")
+
+    std::atomic_int threadsDone;
     void draw(bool precise){
         printf("We are at (%f + %fi) with size %f (zooms %i)\n", (float) xpos, (float) ypos, (float) xsize, zooms);
 
@@ -193,9 +197,10 @@ struct renderScene{
         height = preciseMode ? G.realh : G.height;
 
         if(data == nullptr){
-            data = new floating[width * height];
+            data = new floating[width * height * 3];
         }
 
+        threadsDone.store(0);
         std::thread threads[NUM_THREADS];
         int numlines = height/NUM_THREADS;
         for(int i = 0; i < NUM_THREADS; i++){
@@ -203,7 +208,13 @@ struct renderScene{
             int linesLeft = i == NUM_THREADS - 1 ? numlines + (height % NUM_THREADS) : numlines;
             threads[i] = std::thread([=](){
                 drawThread(i * numlines, linesLeft);
+                threadsDone++;
             });
+        }
+
+        while(threadsDone.load() != NUM_THREADS){
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            blit();
         }
 
         for(int i = 0; i < NUM_THREADS; i++){
@@ -220,13 +231,12 @@ struct renderScene{
 
         for(int y = 0; y < numlines; y++){
             drawline(y + linesoffset, &mem[y * width]);
+            copyMutex.lock();
+            for(int i = 0; i < width; i++){
+                data[(linesoffset + y) * width + i] = mem[i + y * width];
+            }
+            copyMutex.unlock();
         }
-
-        copyMutex.lock();
-        for(int i = 0; i < numlines * width; i++){
-            data[linesoffset * width + i] = mem[i];
-        }
-        copyMutex.unlock();
 
         delete []mem;
     }
@@ -299,6 +309,12 @@ int main(int argc, char *argv[]){
     floating size = .001465;
     zooms = 13;
     //
+
+    //floating x = -0.763833;
+    //floating y = -0.094968;
+    //floating size = .0000000001;
+    //zooms = 27;
+    //
     //floating x = -.743421;
     //floating y = -.178880;
     //floating size = .00000001;
@@ -313,6 +329,8 @@ int main(int argc, char *argv[]){
     renderScene s(G, x, y, size);
     s.set.pctscale = 1;
     s.set.square = true;
+
+    bool fullscreen = false;
 
     SDL_Event event;
     event.type = -1;
@@ -361,6 +379,14 @@ int main(int argc, char *argv[]){
                 if(s.set.pctscale > 0) s.set.pctscale -= .025;
                 isRendered = false;
                 printf("Gamma scaling is %f\n", s.set.pctscale);
+            }else if(event.key.keysym.sym == SDLK_s){
+                s.set.square = !s.set.square;
+                printf("Square mode %s\n", BOOL(s.set.square));
+            }else if(event.key.keysym.sym == SDLK_b){
+                fullscreen = !fullscreen;
+                printf("fullscreen mode %s\n", BOOL(fullscreen));
+                SDL_SetWindowFullscreen(G.window, fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
+                isCalculated = false;
             }else if(event.key.keysym.sym == SDLK_q){
                 goto CLEANUP;
             }
@@ -377,15 +403,20 @@ int main(int argc, char *argv[]){
         case SDL_QUIT: goto CLEANUP; break;
         }
 
-        if(!isCalculated){
-            s.draw(preciseMode || singlePrecise);
-            s.blit();
-            singlePrecise = false;
-            isCalculated = true;
-            isRendered = true;
-        }else if(!isRendered){
-            s.blit();
-            isRendered = true;
+        try{
+            if(!isCalculated){
+                s.draw(preciseMode || singlePrecise);
+                s.blit();
+                singlePrecise = false;
+                isCalculated = true;
+                isRendered = true;
+            }else if(!isRendered){
+                s.blit();
+                isRendered = true;
+            }
+        }catch(std::bad_alloc& exc){
+            printf("OOM\n");
+            fflush(stdout);
         }
         fflush(stdout);
 
