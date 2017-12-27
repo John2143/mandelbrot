@@ -3,11 +3,14 @@
 #include <SDL2/SDL.h>
 #include <cstring>
 #include <thread>
-#include <mingw.thread.h>
+
+#ifdef __MINGW32__
+#    include <mingw.thread.h>
+#    include <mingw.mutex.h>
+#    include <mingw.condition_variable.h>
+#endif
 #include <mutex>
-#include <mingw.mutex.h>
 #include <condition_variable>
-#include <mingw.condition_variable.h>
 #include <atomic>
 
 typedef double floating;
@@ -128,6 +131,7 @@ struct renderSettings{
     floating pctscale;
     bool square;
     int supersamples = 4;
+    bool viewProgress = false;
 
 #define MAX_SUPERSAMPLES 100
     floating supersampleMapX[MAX_SUPERSAMPLES];
@@ -220,9 +224,11 @@ struct renderScene{
             });
         }
 
-        while(threadsDone.load() != NUM_THREADS){
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            blit();
+        if(set.viewProgress){
+            while(threadsDone.load() != NUM_THREADS){
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                blit();
+            }
         }
 
         for(int i = 0; i < NUM_THREADS; i++){
@@ -237,17 +243,30 @@ struct renderScene{
         const int bufferSize = numlines * width;
         floating *mem = new floating[bufferSize];
 
-        for(int y = 0; y < numlines; y++){
-            drawline(y + linesoffset, &mem[y * width]);
-            std::lock_guard<std::mutex> lock(copyMutex);
+        if(set.viewProgress){
             for(int i = 0; i < width; i++){
-                data[(linesoffset + y) * width + i] = mem[i + y * width];
+                data[(linesoffset + numlines - 1) * width + i] = 0xff0f0f0f;
             }
-            if(y != numlines - 1){
+            for(int y = 0; y < numlines; y++){
+                drawline(y + linesoffset, &mem[y * width]);
+                std::lock_guard<std::mutex> lock(copyMutex);
+                //set line in memory
                 for(int i = 0; i < width; i++){
-                    data[(linesoffset + y + 1) * width + i] = 0xffff0ff0;
+                    data[(linesoffset + y) * width + i] = mem[i + y * width];
+                }
+                //draw "leading line"
+                if(y != numlines - 1){
+                    for(int i = 0; i < width; i++){
+                        data[(linesoffset + y + 1) * width + i] = 0xffff0ff0;
+                    }
                 }
             }
+        }else{
+            for(int y = 0; y < numlines; y++){
+                drawline(y + linesoffset, &mem[y * width]);
+            }
+            std::lock_guard<std::mutex> lock(copyMutex);
+            memcpy(&data[linesoffset * width], mem, bufferSize * sizeof(floating));
         }
 
         delete []mem;
@@ -301,8 +320,11 @@ struct renderScene{
     }
 };
 
+bool testmode;
 int main(int argc, char *argv[]){
-    (void) argc; (void) argv;
+    if(argc == 2){
+        if(strcmp(argv[1], "test")) testmode = true;
+    }
 
     graphics G;
 
@@ -328,7 +350,7 @@ int main(int argc, char *argv[]){
     //zooms = 29;
 
     bool preciseMode = false;
-    bool singlePrecise = true;
+    bool singlePrecise = testmode;
 
     bool isCalculated = true;
     bool isRendered = true;
@@ -393,6 +415,9 @@ int main(int argc, char *argv[]){
                 fullscreen = !fullscreen;
                 printf("fullscreen mode %s\n", BOOL(fullscreen));
                 SDL_SetWindowFullscreen(G.window, fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
+            }else if(event.key.keysym.sym == SDLK_p){
+                s.set.viewProgress = !s.set.viewProgress;
+                printf("view progress mode %s\n", BOOL(s.set.viewProgress));
             }else if(event.key.keysym.sym == SDLK_q){
                 goto CLEANUP;
             }
@@ -415,7 +440,7 @@ int main(int argc, char *argv[]){
                 singlePrecise = false;
                 isCalculated = true;
                 isRendered = true;
-                goto CLEANUP;
+                if(testmode) goto CLEANUP;
             }else if(!isRendered){
                 s.blit();
                 isRendered = true;
