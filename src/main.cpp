@@ -12,6 +12,7 @@
 #include <mutex>
 #include <condition_variable>
 #include <atomic>
+#include <future>
 
 typedef double floating;
 
@@ -165,9 +166,16 @@ struct renderScene{
     floating endx, endy, startx, starty;
     int width, height;
 
+    std::thread renderThread;
+
+    std::atomic_bool isRendering;
+    std::atomic_bool needsBlit;
+
     renderScene(graphics &G, floating x, floating y, floating size):
         G(G), xpos(x), ypos(y), xsize(size){
 
+        isRendering = false;
+        needsBlit = false;
         data = nullptr;
     }
 
@@ -212,7 +220,7 @@ struct renderScene{
             data = new floating[width * height];
         }
 
-        threadsDone.store(0);
+        threadsDone = 0;
         std::thread threads[NUM_THREADS];
         int numlines = height/NUM_THREADS;
         for(int i = 0; i < NUM_THREADS; i++){
@@ -227,13 +235,15 @@ struct renderScene{
         if(set.viewProgress){
             while(threadsDone.load() != NUM_THREADS){
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                blit();
+                needsBlit = true;
             }
         }
 
         for(int i = 0; i < NUM_THREADS; i++){
             threads[i].join();
         }
+
+        isRendering = false;
     }
 
     std::mutex copyMutex;
@@ -320,6 +330,8 @@ struct renderScene{
     }
 };
 
+
+
 bool testmode;
 int main(int argc, char *argv[]){
     if(argc == 2){
@@ -364,95 +376,111 @@ int main(int argc, char *argv[]){
     SDL_Event event;
     event.type = -1;
     for(;;) {
-        switch(event.type){
-        case SDL_MOUSEBUTTONDOWN:
-            if(event.button.button == SDL_BUTTON_LEFT){
-                printf("clicked %i %i\n", event.button.x, event.button.y);
-                x = lerp(event.button.x, G.realw, x - size/2, x + size / 2);
-                y = lerp(event.button.y, G.realh, y - size * G.aspectRatio / 2, y + size * G.aspectRatio / 2);
-                size /= 2;
-                isCalculated = false;
-                zooms++;
-                s = renderScene(G, x, y, size);
-            }else if(event.button.button == SDL_BUTTON_RIGHT){
-                if(zooms > 0){
-                    size *= 2;
+        if(!s.isRendering){
+            switch(event.type){
+            case SDL_MOUSEBUTTONDOWN:
+                if(event.button.button == SDL_BUTTON_LEFT){
+                    printf("clicked %i %i\n", event.button.x, event.button.y);
+                    x = lerp(event.button.x, G.realw, x - size/2, x + size / 2);
+                    y = lerp(event.button.y, G.realh, y - size * G.aspectRatio / 2, y + size * G.aspectRatio / 2);
+                    size /= 2;
                     isCalculated = false;
-                    zooms--;
+                    zooms++;
+                    s = renderScene(G, x, y, size);
+                }else if(event.button.button == SDL_BUTTON_RIGHT){
+                    if(zooms > 0){
+                        size *= 2;
+                        isCalculated = false;
+                        zooms--;
+                    }
+                    s = renderScene(G, x, y, size);
                 }
-                s = renderScene(G, x, y, size);
-            }
-        break;
-        case SDL_KEYDOWN:
-            if(event.key.keysym.sym == SDLK_f){
-                preciseMode = !preciseMode;
-                printf("Precise mode %s\n", preciseMode ? "yes" : "no");
-            }else if(event.key.keysym.sym == SDLK_r){
-                singlePrecise = true;
-                isCalculated = false;
-                printf("Claculating a single frame\n");
-            }else if(event.key.keysym.sym == SDLK_e){
-                isRendered = false;
-                printf("Rendering a single frame\n");
-            }else if(event.key.keysym.sym == SDLK_RIGHT){
-                if((size_t) s.set.supersamples < sizeof(s.set.supersampleMapX) / sizeof(s.set.supersampleMapX[0])) s.set.supersamples++;
-                printf("Supersamples is %i\n", s.set.supersamples);
-            }else if(event.key.keysym.sym == SDLK_LEFT){
-                if(s.set.supersamples > 1) s.set.supersamples--;
-                printf("Supersamples is %i\n", s.set.supersamples);
-            }else if(event.key.keysym.sym == SDLK_UP){
-                if(s.set.pctscale < 1) s.set.pctscale += .025;
-                isRendered = false;
-                printf("Gamma scaling is %f\n", s.set.pctscale);
-            }else if(event.key.keysym.sym == SDLK_DOWN){
-                if(s.set.pctscale > 0) s.set.pctscale -= .025;
-                isRendered = false;
-                printf("Gamma scaling is %f\n", s.set.pctscale);
-            }else if(event.key.keysym.sym == SDLK_s){
-                s.set.square = !s.set.square;
-                printf("Square mode %s\n", BOOL(s.set.square));
-            }else if(event.key.keysym.sym == SDLK_b){
-                fullscreen = !fullscreen;
-                printf("fullscreen mode %s\n", BOOL(fullscreen));
-                SDL_SetWindowFullscreen(G.window, fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
-            }else if(event.key.keysym.sym == SDLK_p){
-                s.set.viewProgress = !s.set.viewProgress;
-                printf("view progress mode %s\n", BOOL(s.set.viewProgress));
-            }else if(event.key.keysym.sym == SDLK_q){
-                goto CLEANUP;
-            }
-        break;
-        case SDL_WINDOWEVENT:
-            switch(event.window.event){
-            //case SDL_WINDOWEVENT_RESIZED:
-            case SDL_WINDOWEVENT_SIZE_CHANGED:
-                isCalculated = !G.resize(event.window.data1, event.window.data2);
             break;
+            case SDL_KEYDOWN:
+                if(event.key.keysym.sym == SDLK_f){
+                    preciseMode = !preciseMode;
+                    printf("Precise mode %s\n", preciseMode ? "yes" : "no");
+                }else if(event.key.keysym.sym == SDLK_r){
+                    singlePrecise = true;
+                    isCalculated = false;
+                    printf("Claculating a single frame\n");
+                }else if(event.key.keysym.sym == SDLK_e){
+                    isRendered = false;
+                    printf("Rendering a single frame\n");
+                }else if(event.key.keysym.sym == SDLK_RIGHT){
+                    if((size_t) s.set.supersamples < sizeof(s.set.supersampleMapX) / sizeof(s.set.supersampleMapX[0])) s.set.supersamples++;
+                    printf("Supersamples is %i\n", s.set.supersamples);
+                }else if(event.key.keysym.sym == SDLK_LEFT){
+                    if(s.set.supersamples > 1) s.set.supersamples--;
+                    printf("Supersamples is %i\n", s.set.supersamples);
+                }else if(event.key.keysym.sym == SDLK_UP){
+                    if(s.set.pctscale < 1) s.set.pctscale += .025;
+                    isRendered = false;
+                    printf("Gamma scaling is %f\n", s.set.pctscale);
+                }else if(event.key.keysym.sym == SDLK_DOWN){
+                    if(s.set.pctscale > 0) s.set.pctscale -= .025;
+                    isRendered = false;
+                    printf("Gamma scaling is %f\n", s.set.pctscale);
+                }else if(event.key.keysym.sym == SDLK_s){
+                    s.set.square = !s.set.square;
+                    printf("Square mode %s\n", BOOL(s.set.square));
+                }else if(event.key.keysym.sym == SDLK_b){
+                    fullscreen = !fullscreen;
+                    printf("fullscreen mode %s\n", BOOL(fullscreen));
+                    SDL_SetWindowFullscreen(G.window, fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
+                }else if(event.key.keysym.sym == SDLK_p){
+                    s.set.viewProgress = !s.set.viewProgress;
+                    printf("view progress mode %s\n", BOOL(s.set.viewProgress));
+                }else if(event.key.keysym.sym == SDLK_q){
+                    goto CLEANUP;
+                }
+            break;
+            case SDL_WINDOWEVENT:
+                switch(event.window.event){
+                //case SDL_WINDOWEVENT_RESIZED:
+                case SDL_WINDOWEVENT_SIZE_CHANGED:
+                    isCalculated = !G.resize(event.window.data1, event.window.data2);
+                break;
+                }
+            break;
+            case SDL_QUIT: goto CLEANUP; break;
             }
-        break;
-        case SDL_QUIT: goto CLEANUP; break;
         }
 
-        try{
-            if(!isCalculated){
+        if(!isCalculated && !s.isRendering){
+            s.isRendering = true;
+
+            s.renderThread = std::thread([&]{
+                printf("Thread started \n");
                 s.draw(preciseMode || singlePrecise);
-                s.blit();
+                printf("Thread  drawn\n");
                 singlePrecise = false;
                 isCalculated = true;
                 isRendered = true;
-                if(testmode) goto CLEANUP;
-            }else if(!isRendered){
-                s.blit();
-                isRendered = true;
-            }
+            });
 
-        }catch(std::bad_alloc& exc){
-            printf("OOM\n");
-            fflush(stdout);
+            s.renderThread.detach();
+
+            //if(testmode) goto CLEANUP;
         }
+        if(s.needsBlit || !isRendered){
+            s.blit();
+            printf("Thread blit\n");
+            s.needsBlit = false;
+            isRendered = true;
+        }
+
         fflush(stdout);
 
-        SDL_WaitEvent(&event);
+        if(s.isRendering){
+            int hasEv = SDL_PollEvent(&event);
+            if(!hasEv){
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                event.type = -1;
+            }
+        }else{
+            SDL_WaitEvent(&event);
+        }
     }
 
 CLEANUP:
