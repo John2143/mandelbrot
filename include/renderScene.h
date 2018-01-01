@@ -1,5 +1,6 @@
 #pragma once
 #include "global.h"
+#include "graphics.h"
 
 struct complex{
     static void print(floating real, floating imag){
