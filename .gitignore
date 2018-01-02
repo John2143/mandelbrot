@@ -2,3 +2,4 @@ gmon.out
 mbrot
 mbrot.exe
 src/*.o
+src/*.d
