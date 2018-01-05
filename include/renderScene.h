@@ -105,6 +105,31 @@ constexpr floating lerp(floating num, int max, floating start, floating end){
     return (num / (floating) max) * (end - start) + start;
 }
 
+typedef uint8_t  u8;
+typedef uint16_t u16;
+typedef uint32_t u32;
+typedef uint64_t u64;
+
+#pragma pack(push, 1)
+struct BMP_Header1{
+    u16 identifier; // "BM" in ascii
+    u32 size;
+    u32 reserved; //should be 0
+    u32 bitmapStartOffset;
+};
+
+struct BMP_Header2{
+    u32 headerSize;
+    u32 width, height;
+    u16 colorPlanes;
+    u16 BPP;
+    u32 compressionMethod;
+    u32 sizeDummy;
+    u32 hrez, vrez;
+    u32 paletteSize, paletteImportance;
+};
+#pragma pack(pop)
+
 struct renderScene{
     renderSettings set;
     view v;
@@ -246,7 +271,8 @@ struct renderScene{
 #define min(a, b) ((a) < (b) ? (a) : (b))
 #define clamp(n, a, b) min(max(n, a), b)
 
-    void shader(uint32_t *pixels){
+    template<typename T>
+    void shader(T *pixels){
         for(int i = 0; i < width * height; i++){
             float f = data[i];
             f /= ((MAX_ITERZ(preciseMode, v.zooms) + 1) * set.pctscale);
@@ -254,14 +280,20 @@ struct renderScene{
             if(set.square){
                 f *= f;
             }
-            uint32_t value = f * 0xff;
-            value = 0xFF000000 + value + (value << 8) + (value << 16);
-            pixels[i] = value;
+            if(sizeof(T) == sizeof(uint32_t)){
+                T value = f * 0xff;
+                value = 0xFF000000 + value + (value << 8) + (value << 16);
+                pixels[i] = value;
+            }else{
+                T value = f * ((1ull << (sizeof(T) * 8)) - 1);
+                pixels[i] = value;
+            }
         }
     }
 
     void blit(){
         if(data == nullptr) return;
+        printf("data is not nullptr\n");
         uint32_t *pixels = new uint32_t[width * height];
         shader(pixels);
 
@@ -273,5 +305,38 @@ struct renderScene{
         SDL_RenderCopy(G.renderer, tex, NULL, NULL);
         SDL_RenderPresent(G.renderer);
         delete []pixels;
+    }
+
+    void renderToFile(){
+        FILE *f = fopen("outfile.bmp", "w");
+        BMP_Header1 h1;
+        h1.identifier = 0x4d42;
+        h1.reserved = 0;
+        h1.bitmapStartOffset = sizeof(BMP_Header1) + sizeof(BMP_Header2);
+        h1.size = h1.bitmapStartOffset + width * height * 4;
+
+        BMP_Header2 h2;
+        h2.headerSize = 40;
+        h2.hrez = h2.width = width;
+        h2.vrez = h2.height = height;
+        h2.colorPlanes = 1;
+        h2.BPP = 32;
+        h2.compressionMethod = 0;
+        h2.sizeDummy = 0;
+        h2.paletteSize = h2.paletteImportance = 0;
+
+        fwrite(&h1, sizeof(BMP_Header1), 1, f);
+        fwrite(&h2, sizeof(BMP_Header2), 1, f);
+
+        u32 *pixels = new u32[width * height];
+        shader(pixels);
+
+        for(int i = 0; i < height; i++){
+            //Image is written bottom row first
+            fwrite(&pixels[(height - i) * width], width * 4, 1, f);
+        }
+
+        delete []pixels;
+        fclose(f);
     }
 };

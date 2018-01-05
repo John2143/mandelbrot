@@ -43,6 +43,10 @@ int manageInput(SDL_Event &event, renderScene &s){
             s.v.singlePrecise = true;
             s.needsFullRender = true;
             printf("Claculating a single frame\n");
+        }else if(event.key.keysym.sym == SDLK_z){
+            if(isRendering) return INPUT_OK;
+            s.renderToFile();
+            printf("Rendering to file\n");
         }else if(event.key.keysym.sym == SDLK_e){
             if(isRendering) return INPUT_OK;
             s.needsBlit = true;
@@ -88,7 +92,9 @@ int manageInput(SDL_Event &event, renderScene &s){
         //case SDL_WINDOWEVENT_RESIZED:
         case SDL_WINDOWEVENT_SIZE_CHANGED:
             if(isRendering) return INPUT_OK;
-            (void) s.G.resize(event.window.data1, event.window.data2);
+            if(s.G.resize(event.window.data1, event.window.data2)){
+                s.removeData();
+            }
         break;
         }
     break;
